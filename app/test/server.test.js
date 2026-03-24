@@ -694,6 +694,9 @@ test('Mongo connection refusal emits structured fallback logs', async () => {
 		assert.equal(mongoFallbackActivation.level, 'warn');
 		assert.equal(mongoConnectFailure.mode, 'Client-local stateful');
 		assert.equal(mongoFallbackActivation.mode, 'Client-local stateful');
+		assert.equal(mongoConnectFailure.fallbackStorage, 'client-local');
+		assert.equal(mongoFallbackActivation.fallbackStorage, 'client-local');
+		assert.equal(mongoConnectFailure.message, 'Mongo connection failed; using client-local fallback');
 		assert.match(String(mongoConnectFailure.error || ''), /ECONNREFUSED|connect/i);
 	} finally {
 		delete process.env.MONGODB_URI;
@@ -720,6 +723,9 @@ test('Mongo connection refusal emits server-side fallback logs when STATEFUL_MOD
 		assert.ok(mongoFallbackActivation, 'expected MDB_004 log entry');
 		assert.equal(mongoConnectFailure.mode, 'Server-side stateful');
 		assert.equal(mongoFallbackActivation.mode, 'Server-side stateful');
+		assert.equal(mongoConnectFailure.fallbackStorage, 'server-memory');
+		assert.equal(mongoFallbackActivation.fallbackStorage, 'server-memory');
+		assert.equal(mongoConnectFailure.message, 'Mongo connection failed; using server in-memory fallback');
 	} finally {
 		delete process.env.STATEFUL_MODE;
 		delete process.env.MONGODB_URI;

@@ -26,6 +26,24 @@ function getFallbackModeLabel() {
 	return isServerStatefulModeEnabled() ? 'Server-side stateful' : 'Client-local stateful';
 }
 
+function getFallbackStorage() {
+	return isServerStatefulModeEnabled() ? 'server-memory' : 'client-local';
+}
+
+function getMongoFallbackMessage(reason) {
+	const usesServerMemory = getFallbackStorage() === 'server-memory';
+
+	if (reason === 'driver_missing') {
+		return usesServerMemory
+			? 'MongoDB driver not installed; using server in-memory fallback'
+			: 'MongoDB driver not installed; using client-local fallback';
+	}
+
+	return usesServerMemory
+		? 'Mongo connection failed; using server in-memory fallback'
+		: 'Mongo connection failed; using client-local fallback';
+}
+
 function defaultGameState() {
 	return {
 		board: ['', '', '', '', '', '', '', '', ''],
@@ -159,12 +177,14 @@ function createMongoStateStore(mongoUri, { logEvent } = {}) {
 		const safeMongoTarget = getMongoTargetForLog(mongoUri);
 		const errorMessage = error && error.message ? error.message : String(error || 'unknown_error');
 		const fallbackMode = getFallbackModeLabel();
+		const fallbackStorage = getFallbackStorage();
 
 		emitMongoLog('error', {
 			code: 'MDB_002',
 			message,
 			reason,
 			mode: fallbackMode,
+			fallbackStorage,
 			mongoTarget: safeMongoTarget,
 			error: errorMessage
 		});
@@ -174,6 +194,7 @@ function createMongoStateStore(mongoUri, { logEvent } = {}) {
 			message: 'Mongo fallback activated',
 			reason,
 			mode: fallbackMode,
+			fallbackStorage,
 			mongoTarget: safeMongoTarget
 		});
 	};
@@ -185,7 +206,7 @@ function createMongoStateStore(mongoUri, { logEvent } = {}) {
 		if (!hasLoggedMissingMongoDriver) {
 			hasLoggedMissingMongoDriver = true;
 			activateFallback({
-				message: 'MongoDB driver not installed; using in-memory fallback',
+				message: getMongoFallbackMessage('driver_missing'),
 				error: new Error('mongodb_driver_missing'),
 				reason: 'driver_missing'
 			});
@@ -322,7 +343,7 @@ function createMongoStateStore(mongoUri, { logEvent } = {}) {
 			}
 
 			activateFallback({
-				message: 'Mongo connection failed; using in-memory fallback',
+				message: getMongoFallbackMessage('connect_failed'),
 				error,
 				reason: 'connect_failed'
 			});
