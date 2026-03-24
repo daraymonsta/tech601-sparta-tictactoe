@@ -113,13 +113,60 @@ function resolveSessionId(req, res) {
 	return 'default-session';
 }
 
-function createMongoStateStore(mongoUri) {
+function getMongoTargetForLog(mongoUri) {
+	try {
+		const url = new URL(mongoUri);
+		const databaseName = url.pathname && url.pathname !== '/' ? url.pathname.slice(1) : '(default)';
+		return `${url.host}/${databaseName}`;
+	} catch {
+		return 'unknown';
+	}
+}
+
+function createMongoStateStore(mongoUri, { logEvent } = {}) {
 	const initialSharedState = defaultSharedState();
 	let fallbackState = initialSharedState;
 	let sessionsCollection = null;
 	let scoreboardCollection = null;
 	let legacyCollection = null;
 	let isClosed = false;
+	let connectionState = 'pending';
+	let hasLoggedFallbackActivation = false;
+
+	const emitMongoLog = (level, payload) => {
+		if (typeof logEvent === 'function') {
+			logEvent(level, payload);
+		}
+	};
+
+	const activateFallback = ({ message, error, reason }) => {
+		connectionState = 'fallback';
+
+		if (hasLoggedFallbackActivation) {
+			return;
+		}
+
+		hasLoggedFallbackActivation = true;
+		const safeMongoTarget = getMongoTargetForLog(mongoUri);
+		const errorMessage = error && error.message ? error.message : String(error || 'unknown_error');
+
+		emitMongoLog('error', {
+			code: 'MDB_002',
+			message,
+			reason,
+			mode: 'Server-side stateful',
+			mongoTarget: safeMongoTarget,
+			error: errorMessage
+		});
+
+		emitMongoLog('warn', {
+			code: 'MDB_004',
+			message: 'Mongo fallback activated',
+			reason,
+			mode: 'Server-side stateful',
+			mongoTarget: safeMongoTarget
+		});
+	};
 
 	let MongoClient;
 	try {
@@ -127,11 +174,18 @@ function createMongoStateStore(mongoUri) {
 	} catch {
 		if (!hasLoggedMissingMongoDriver) {
 			hasLoggedMissingMongoDriver = true;
-			console.warn('MongoDB driver not installed. Falling back to in-memory persistent state.');
+			activateFallback({
+				message: 'MongoDB driver not installed; using in-memory fallback',
+				error: new Error('mongodb_driver_missing'),
+				reason: 'driver_missing'
+			});
 		}
 
 		return {
 			uri: mongoUri,
+			awaitReady: async () => {},
+			isMongoConnected: () => false,
+			isFallbackActive: () => true,
 			getState: async (sessionId) => {
 				const shared = normalizeSharedState(fallbackState);
 				const game = shared.gamesBySession[sessionId]
@@ -192,9 +246,18 @@ function createMongoStateStore(mongoUri) {
 	const initPromise = client
 		.connect()
 		.then(async () => {
+			connectionState = 'connected';
+
 			if (isClosed) {
 				return;
 			}
+
+			emitMongoLog('info', {
+				code: 'MDB_001',
+				message: 'Mongo connection established',
+				mode: 'Persistent with Mongo DB',
+				mongoTarget: getMongoTargetForLog(mongoUri)
+			});
 
 			const db = client.db();
 			sessionsCollection = db.collection('game_sessions');
@@ -248,11 +311,20 @@ function createMongoStateStore(mongoUri) {
 				return;
 			}
 
-			console.warn(`MongoDB connect failed, using in-memory fallback: ${error.message}`);
+			activateFallback({
+				message: 'Mongo connection failed; using in-memory fallback',
+				error,
+				reason: 'connect_failed'
+			});
 		});
 
 	return {
 		uri: mongoUri,
+		awaitReady: async () => {
+			await initPromise.catch(() => {});
+		},
+		isMongoConnected: () => connectionState === 'connected',
+		isFallbackActive: () => connectionState === 'fallback',
 		getState: async (sessionId) => {
 			await initPromise.catch(() => {});
 
@@ -521,23 +593,29 @@ function isValidStatePayload(payload) {
 	return true;
 }
 
-function getRuntimeMode() {
-	const mongoConnected = Boolean(process.env.MONGODB_URI);
+function getRuntimeMode({ mongoStore } = {}) {
+	const mongoConfigured = Boolean(process.env.MONGODB_URI);
 	const statefulModeValue = String(process.env.STATEFUL_MODE || '').trim().toLowerCase();
 	const statefulRedisModeValue = String(process.env.STATEFUL_REDIS_MODE || '').trim().toLowerCase();
 	const markerImageToggleEnabled = isEnabledEnvToggle(process.env.USE_MARKER_IMAGES);
-	const statefulToggleEnabled =
-		(statefulModeValue === 'server'
-			|| statefulModeValue === 'true'
-			|| statefulRedisModeValue === 'server'
-			|| statefulRedisModeValue === 'true')
-		&& !mongoConnected;
+	const mongoConnected = Boolean(mongoConfigured
+		&& mongoStore
+		&& typeof mongoStore.isMongoConnected === 'function'
+		&& mongoStore.isMongoConnected());
+	const fallbackToServerStateful = Boolean(mongoConfigured && !mongoConnected);
+	const explicitServerToggleEnabled =
+		statefulModeValue === 'server'
+		|| statefulModeValue === 'true'
+		|| statefulRedisModeValue === 'server'
+		|| statefulRedisModeValue === 'true';
+	const statefulToggleEnabled = !mongoConnected && (fallbackToServerStateful || explicitServerToggleEnabled);
 	const clientLocalStateful = !mongoConnected && !statefulToggleEnabled;
 	const modeLabel = mongoConnected
 		? 'Persistent with Mongo DB'
 		: (statefulToggleEnabled ? 'Server-side stateful' : 'Client-local stateful');
 
 	return {
+		mongoConfigured,
 		mongoConnected,
 		statefulToggleEnabled,
 		markerImageToggleEnabled,
@@ -761,7 +839,7 @@ function createServer({ port = 3000, logger, metrics } = {}) {
 		}
 
 		if (!mongoStateStore || mongoStateStore.uri !== mongoUri) {
-			mongoStateStore = createMongoStateStore(mongoUri);
+			mongoStateStore = createMongoStateStore(mongoUri, { logEvent });
 		}
 
 		return mongoStateStore;
@@ -820,10 +898,14 @@ function createServer({ port = 3000, logger, metrics } = {}) {
 				: crypto.randomUUID();
 			res.setHeader('x-correlation-id', correlationId);
 
-			const mode = getRuntimeMode();
-			const scoreboardTitle = getScoreboardTitle(mode);
 			const sessionId = resolveSessionId(req, res);
-			const mongoStore = mode.mongoConnected ? getMongoStateStore() : null;
+			const configuredMode = getRuntimeMode();
+			const mongoStore = configuredMode.mongoConfigured ? getMongoStateStore() : null;
+			if (mongoStore && typeof mongoStore.awaitReady === 'function') {
+				await mongoStore.awaitReady();
+			}
+			const mode = getRuntimeMode({ mongoStore });
+			const scoreboardTitle = getScoreboardTitle(mode);
 
 			logEvent('info', {
 				code: 'REQ_100',

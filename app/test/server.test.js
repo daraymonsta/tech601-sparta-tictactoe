@@ -559,6 +559,54 @@ test('GET / shows Mongo mode indicator when database is configured', async () =>
 	}
 });
 
+test('GET / falls back to server-side mode indicator when Mongo connection is refused', async () => {
+	delete process.env.STATEFUL_MODE;
+	process.env.MONGODB_URI = 'mongodb://127.0.0.1:1/tictactoe_test';
+
+	const server = createServer({ port: 3000 });
+	const port = await listen(server);
+
+	try {
+		const response = await fetch(`http://127.0.0.1:${port}/`);
+		const body = await response.text();
+
+		assert.equal(response.status, 200);
+		assert.match(body, /Mode: Server-side stateful/i);
+		assert.doesNotMatch(body, /Mode: Persistent with Mongo DB/i);
+	} finally {
+		delete process.env.MONGODB_URI;
+		await new Promise((resolve) => server.close(resolve));
+	}
+});
+
+test('Mongo connection refusal emits structured fallback logs', async () => {
+	delete process.env.STATEFUL_MODE;
+	process.env.MONGODB_URI = 'mongodb://127.0.0.1:1/tictactoe_test';
+
+	const logger = createMemoryLogger();
+	const server = createServer({ port: 3000, logger });
+	const port = await listen(server);
+
+	try {
+		const response = await fetch(`http://127.0.0.1:${port}/api/state`);
+		assert.equal(response.status, 200);
+
+		const mongoConnectFailure = logger.entries.find((entry) => entry.code === 'MDB_002');
+		const mongoFallbackActivation = logger.entries.find((entry) => entry.code === 'MDB_004');
+
+		assert.ok(mongoConnectFailure, 'expected MDB_002 log entry');
+		assert.ok(mongoFallbackActivation, 'expected MDB_004 log entry');
+		assert.equal(mongoConnectFailure.level, 'error');
+		assert.equal(mongoFallbackActivation.level, 'warn');
+		assert.equal(mongoConnectFailure.mode, 'Server-side stateful');
+		assert.equal(mongoFallbackActivation.mode, 'Server-side stateful');
+		assert.match(String(mongoConnectFailure.error || ''), /ECONNREFUSED|connect/i);
+	} finally {
+		delete process.env.MONGODB_URI;
+		await new Promise((resolve) => server.close(resolve));
+	}
+});
+
 test('GET / shows stateful mode indicator when STATEFUL_MODE=server', async () => {
 	process.env.STATEFUL_MODE = 'server';
 	delete process.env.MONGODB_URI;
