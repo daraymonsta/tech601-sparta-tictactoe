@@ -1,11 +1,14 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { execFileSync } = require('node:child_process');
+const { execFile } = require('node:child_process');
+const { promisify } = require('node:util');
 const { readFileSync, mkdtempSync } = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 
 const { createServer } = require('../server');
+
+const execFileAsync = promisify(execFile);
 
 function createMemoryLogger() {
 	const entries = [];
@@ -2513,7 +2516,7 @@ test('seed.js uses SEED_BASE_URL to seed a running server on a non-default port'
 			})
 		});
 
-		const output = execFileSync(process.execPath, [seedScriptPath], {
+		const { stdout } = await execFileAsync(process.execPath, [seedScriptPath], {
 			cwd: path.join(__dirname, '..'),
 			env: {
 				...process.env,
@@ -2523,7 +2526,7 @@ test('seed.js uses SEED_BASE_URL to seed a running server on a non-default port'
 			encoding: 'utf8'
 		});
 
-		assert.match(output, /Seeded active app state via \/api\/seed \(10 records\)\./);
+		assert.match(stdout, /Seeded active app state via \/api\/seed \(10 records\)\./);
 
 		const stateResponse = await fetch(`http://127.0.0.1:${port}/api/state`);
 		const state = await stateResponse.json();
