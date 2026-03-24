@@ -940,6 +940,50 @@ test('POST /api/seed resets scoreboard to default 10 seeded records', async () =
 	}
 });
 
+test('POST /api/game/submit-score saves score in server-side stateful fallback mode when Mongo connection is refused', async () => {
+	process.env.STATEFUL_MODE = 'server';
+	process.env.MONGODB_URI = 'mongodb://127.0.0.1:1/tictactoe_test';
+
+	const server = createServer({ port: 3000 });
+	const port = await listen(server);
+
+	try {
+		// Set up game state with awaitingInitials so we can submit
+		await fetch(`http://127.0.0.1:${port}/api/state`, {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({
+				game: {
+					board: ['X', 'X', 'X', 'O', 'O', '', '', '', ''],
+					currentPlayer: 'O',
+					roundNumber: 1,
+					score: 150,
+					awaitingInitials: true,
+					gameOver: true,
+					lastRoundResult: 'win'
+				}
+			})
+		});
+
+		// Submit score
+		const submitResponse = await fetch(`http://127.0.0.1:${port}/api/game/submit-score`, {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({ initials: 'TST' })
+		});
+		assert.equal(submitResponse.status, 200);
+
+		// Verify score was saved to in-memory state
+		const stateResponse = await fetch(`http://127.0.0.1:${port}/api/state`);
+		const state = await stateResponse.json();
+		assert.ok(state.scoreboard.some((entry) => entry.initials === 'TST' && entry.score === 150), 'expected score to be saved in server-side stateful fallback');
+	} finally {
+		delete process.env.STATEFUL_MODE;
+		delete process.env.MONGODB_URI;
+		await new Promise((resolve) => server.close(resolve));
+	}
+});
+
 test('POST /api/game/move plays against computer opponent', async () => {
 	process.env.STATEFUL_MODE = 'server';
 	delete process.env.MONGODB_URI;

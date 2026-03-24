@@ -1285,7 +1285,7 @@ function createServer({ port = 3000, logger, metrics } = {}) {
 
 			if (req.url === '/api/seed' && req.method === 'POST') {
 				const seededScoreboard = getSeededScoreboard();
-				if (mongoStore) {
+				if (useMongoStore) {
 					await mongoStore.replaceScoreboard(seededScoreboard);
 				} else {
 					const activeState = await getActiveState();
@@ -1457,7 +1457,7 @@ function createServer({ port = 3000, logger, metrics } = {}) {
 						return;
 					}
 
-					if (mongoStore) {
+					if (useMongoStore) {
 						await mongoStore.appendScoreboardEntry({ initials, score: activeState.game.score });
 						await mongoStore.setGameState(sessionId, defaultState().game);
 					} else {
