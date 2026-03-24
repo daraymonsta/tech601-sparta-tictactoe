@@ -64,7 +64,7 @@ function resetModeEnv() {
 	delete process.env.MONGODB_URI;
 }
 
-function createMongoTestUri(baseUri = process.env.MONGODB_URI || 'mongodb://localhost:27017/tictactoe') {
+function createMongoTestUri(baseUri = 'mongodb://localhost:27017/tictactoe') {
 	try {
 		const uri = new URL(baseUri);
 		const dbName = uri.pathname && uri.pathname !== '/' ? uri.pathname.slice(1) : 'tictactoe';
@@ -76,7 +76,24 @@ function createMongoTestUri(baseUri = process.env.MONGODB_URI || 'mongodb://loca
 	}
 }
 
+function isMongoIntegrationEnabled() {
+	const value = String(process.env.RUN_MONGO_INTEGRATION || '').trim().toLowerCase();
+	return value === 'true';
+}
+
+function createMongoIntegrationUri() {
+	const configuredUri = String(process.env.MONGODB_INTEGRATION_URI || '').trim();
+	const baseUri = configuredUri || 'mongodb://localhost:27017/tictactoe';
+	return createMongoTestUri(baseUri);
+}
+
 const MONGO_TEST_URI = createMongoTestUri();
+const MONGO_INTEGRATION_ENABLED = isMongoIntegrationEnabled();
+const MONGO_INTEGRATION_URI = createMongoIntegrationUri();
+
+function mongoIntegrationTest(name, run) {
+	test(name, { skip: !MONGO_INTEGRATION_ENABLED }, run);
+}
 
 test.beforeEach(() => {
 	resetModeEnv();
@@ -117,6 +134,61 @@ test('withEnv applies overrides and restores original env values', async () => {
 
 test('mongo test URI always targets an isolated *_test database', () => {
 	assert.match(MONGO_TEST_URI, /\/[^/?#]+_test(?:[/?#]|$)/);
+});
+
+test('mongo test URI should not inherit ambient deployment MONGODB_URI host', () => {
+	const originalMongoUri = process.env.MONGODB_URI;
+	process.env.MONGODB_URI = 'mongodb://172.31.19.159:27017/tictactoe';
+
+	try {
+		const derived = createMongoTestUri();
+		assert.match(derived, /localhost:27017/);
+		assert.match(derived, /tictactoe_test/);
+	} finally {
+		if (typeof originalMongoUri === 'string') {
+			process.env.MONGODB_URI = originalMongoUri;
+		} else {
+			delete process.env.MONGODB_URI;
+		}
+	}
+});
+
+test('mongo integration URI prefers MONGODB_INTEGRATION_URI over MONGODB_URI', () => {
+	const originalMongoUri = process.env.MONGODB_URI;
+	const originalMongoIntegrationUri = process.env.MONGODB_INTEGRATION_URI;
+	process.env.MONGODB_URI = 'mongodb://172.31.19.159:27017/tictactoe';
+	process.env.MONGODB_INTEGRATION_URI = 'mongodb://127.0.0.1:27017/training_suite';
+
+	try {
+		const derived = createMongoIntegrationUri();
+		assert.match(derived, /127\.0\.0\.1:27017/);
+		assert.match(derived, /training_suite_test/);
+	} finally {
+		if (typeof originalMongoUri === 'string') {
+			process.env.MONGODB_URI = originalMongoUri;
+		} else {
+			delete process.env.MONGODB_URI;
+		}
+
+		if (typeof originalMongoIntegrationUri === 'string') {
+			process.env.MONGODB_INTEGRATION_URI = originalMongoIntegrationUri;
+		} else {
+			delete process.env.MONGODB_INTEGRATION_URI;
+		}
+	}
+});
+
+test('mongo integration test flag defaults to disabled', () => {
+	const originalFlag = process.env.RUN_MONGO_INTEGRATION;
+	delete process.env.RUN_MONGO_INTEGRATION;
+
+	try {
+		assert.equal(isMongoIntegrationEnabled(), false);
+	} finally {
+		if (typeof originalFlag === 'string') {
+			process.env.RUN_MONGO_INTEGRATION = originalFlag;
+		}
+	}
 });
 
 test('request lifecycle logs include REQ_100 and REQ_200 with correlation id', async () => {
@@ -541,8 +613,8 @@ test('GET / shows client-local stateful mode indicator when no database is conne
 	}
 });
 
-test('GET / shows Mongo mode indicator when database is configured', async () => {
-	process.env.MONGODB_URI = MONGO_TEST_URI;
+mongoIntegrationTest('[integration] GET / shows Mongo mode indicator when database is configured', async () => {
+	process.env.MONGODB_URI = MONGO_INTEGRATION_URI;
 
 	const server = createServer({ port: 3000 });
 	const port = await listen(server);
@@ -559,8 +631,29 @@ test('GET / shows Mongo mode indicator when database is configured', async () =>
 	}
 });
 
-test('GET / falls back to server-side mode indicator when Mongo connection is refused', async () => {
+test('GET / falls back to client-local mode indicator when Mongo connection is refused and STATEFUL_MODE is not server', async () => {
 	delete process.env.STATEFUL_MODE;
+	process.env.MONGODB_URI = 'mongodb://127.0.0.1:1/tictactoe_test';
+
+	const server = createServer({ port: 3000 });
+	const port = await listen(server);
+
+	try {
+		const response = await fetch(`http://127.0.0.1:${port}/`);
+		const body = await response.text();
+
+		assert.equal(response.status, 200);
+		assert.match(body, /Mode: Client-local stateful/i);
+		assert.doesNotMatch(body, /Mode: Server-side stateful/i);
+		assert.doesNotMatch(body, /Mode: Persistent with Mongo DB/i);
+	} finally {
+		delete process.env.MONGODB_URI;
+		await new Promise((resolve) => server.close(resolve));
+	}
+});
+
+test('GET / falls back to server-side mode indicator when Mongo connection is refused and STATEFUL_MODE=server', async () => {
+	process.env.STATEFUL_MODE = 'server';
 	process.env.MONGODB_URI = 'mongodb://127.0.0.1:1/tictactoe_test';
 
 	const server = createServer({ port: 3000 });
@@ -574,6 +667,7 @@ test('GET / falls back to server-side mode indicator when Mongo connection is re
 		assert.match(body, /Mode: Server-side stateful/i);
 		assert.doesNotMatch(body, /Mode: Persistent with Mongo DB/i);
 	} finally {
+		delete process.env.STATEFUL_MODE;
 		delete process.env.MONGODB_URI;
 		await new Promise((resolve) => server.close(resolve));
 	}
@@ -598,10 +692,36 @@ test('Mongo connection refusal emits structured fallback logs', async () => {
 		assert.ok(mongoFallbackActivation, 'expected MDB_004 log entry');
 		assert.equal(mongoConnectFailure.level, 'error');
 		assert.equal(mongoFallbackActivation.level, 'warn');
-		assert.equal(mongoConnectFailure.mode, 'Server-side stateful');
-		assert.equal(mongoFallbackActivation.mode, 'Server-side stateful');
+		assert.equal(mongoConnectFailure.mode, 'Client-local stateful');
+		assert.equal(mongoFallbackActivation.mode, 'Client-local stateful');
 		assert.match(String(mongoConnectFailure.error || ''), /ECONNREFUSED|connect/i);
 	} finally {
+		delete process.env.MONGODB_URI;
+		await new Promise((resolve) => server.close(resolve));
+	}
+});
+
+test('Mongo connection refusal emits server-side fallback logs when STATEFUL_MODE=server', async () => {
+	process.env.STATEFUL_MODE = 'server';
+	process.env.MONGODB_URI = 'mongodb://127.0.0.1:1/tictactoe_test';
+
+	const logger = createMemoryLogger();
+	const server = createServer({ port: 3000, logger });
+	const port = await listen(server);
+
+	try {
+		const response = await fetch(`http://127.0.0.1:${port}/api/state`);
+		assert.equal(response.status, 200);
+
+		const mongoConnectFailure = logger.entries.find((entry) => entry.code === 'MDB_002');
+		const mongoFallbackActivation = logger.entries.find((entry) => entry.code === 'MDB_004');
+
+		assert.ok(mongoConnectFailure, 'expected MDB_002 log entry');
+		assert.ok(mongoFallbackActivation, 'expected MDB_004 log entry');
+		assert.equal(mongoConnectFailure.mode, 'Server-side stateful');
+		assert.equal(mongoFallbackActivation.mode, 'Server-side stateful');
+	} finally {
+		delete process.env.STATEFUL_MODE;
 		delete process.env.MONGODB_URI;
 		await new Promise((resolve) => server.close(resolve));
 	}
@@ -740,9 +860,9 @@ test('GET / uses Server Scoreboard title in server-side stateful mode', async ()
 	}
 });
 
-test('GET / uses Global Scoreboard title in Mongo mode', async () => {
+mongoIntegrationTest('[integration] GET / uses Global Scoreboard title in Mongo mode', async () => {
 	delete process.env.STATEFUL_MODE;
-	process.env.MONGODB_URI = MONGO_TEST_URI;
+	process.env.MONGODB_URI = MONGO_INTEGRATION_URI;
 
 	const server = createServer({ port: 3000 });
 	const port = await listen(server);
@@ -1144,8 +1264,8 @@ test('quit after win allows submitting initials and saves score', async () => {
 	}
 });
 
-test('losing a round ends game and allows submitting initials to save final score', async () => {
-	process.env.MONGODB_URI = MONGO_TEST_URI;
+mongoIntegrationTest('[integration] losing a round ends game and allows submitting initials to save final score', async () => {
+	process.env.MONGODB_URI = MONGO_INTEGRATION_URI;
 
 	const server = createServer({ port: 3000 });
 	const port = await listen(server);
@@ -1209,7 +1329,7 @@ test('GET / includes Tic Tac Toe game title', async () => {
 	}
 });
 
-test('GET /scoreboard uses MongoDB-backed scores when database is connected', async () => {
+mongoIntegrationTest('[integration] GET /scoreboard uses MongoDB-backed scores when database is connected', async () => {
 	process.env.STATEFUL_MODE = 'server';
 	delete process.env.MONGODB_URI;
 
@@ -1223,7 +1343,7 @@ test('GET /scoreboard uses MongoDB-backed scores when database is connected', as
 			body: JSON.stringify({ scoreboard: [{ initials: 'RED', score: 111 }] })
 		});
 
-		process.env.MONGODB_URI = MONGO_TEST_URI;
+		process.env.MONGODB_URI = MONGO_INTEGRATION_URI;
 
 		await fetch(`http://127.0.0.1:${port}/api/state`, {
 			method: 'POST',
@@ -1244,8 +1364,8 @@ test('GET /scoreboard uses MongoDB-backed scores when database is connected', as
 	}
 });
 
-test('Mongo store shutdown does not log post-close session warnings', async () => {
-	process.env.MONGODB_URI = MONGO_TEST_URI;
+mongoIntegrationTest('[integration] Mongo store shutdown does not log post-close session warnings', async () => {
+	process.env.MONGODB_URI = MONGO_INTEGRATION_URI;
 	delete process.env.STATEFUL_MODE;
 
 	const warnings = [];
@@ -2460,7 +2580,7 @@ test('GET /api/scoreboard returns top 10 scores in server-side stateful mode', a
 	});
 });
 
-test('GET /api/scoreboard returns mongo-backed scores when Mongo mode is active', async () => {
+mongoIntegrationTest('[integration] GET /api/scoreboard returns mongo-backed scores when Mongo mode is active', async () => {
 	await withEnv({ STATEFUL_MODE: 'server', MONGODB_URI: undefined }, async () => {
 		const server = createServer({ port: 3000 });
 		const port = await listen(server);
@@ -2472,7 +2592,7 @@ test('GET /api/scoreboard returns mongo-backed scores when Mongo mode is active'
 				body: JSON.stringify({ scoreboard: [{ initials: 'RED', score: 111 }] })
 			});
 
-			process.env.MONGODB_URI = MONGO_TEST_URI;
+			process.env.MONGODB_URI = MONGO_INTEGRATION_URI;
 
 			await fetch(`http://127.0.0.1:${port}/api/state`, {
 				method: 'POST',

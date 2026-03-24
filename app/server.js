@@ -17,6 +17,15 @@ function isEnabledEnvToggle(value) {
 	return normalized === 'true';
 }
 
+function isServerStatefulModeEnabled() {
+	const normalized = String(process.env.STATEFUL_MODE || '').trim().toLowerCase();
+	return normalized === 'server' || normalized === 'true';
+}
+
+function getFallbackModeLabel() {
+	return isServerStatefulModeEnabled() ? 'Server-side stateful' : 'Client-local stateful';
+}
+
 function defaultGameState() {
 	return {
 		board: ['', '', '', '', '', '', '', '', ''],
@@ -149,12 +158,13 @@ function createMongoStateStore(mongoUri, { logEvent } = {}) {
 		hasLoggedFallbackActivation = true;
 		const safeMongoTarget = getMongoTargetForLog(mongoUri);
 		const errorMessage = error && error.message ? error.message : String(error || 'unknown_error');
+		const fallbackMode = getFallbackModeLabel();
 
 		emitMongoLog('error', {
 			code: 'MDB_002',
 			message,
 			reason,
-			mode: 'Server-side stateful',
+			mode: fallbackMode,
 			mongoTarget: safeMongoTarget,
 			error: errorMessage
 		});
@@ -163,7 +173,7 @@ function createMongoStateStore(mongoUri, { logEvent } = {}) {
 			code: 'MDB_004',
 			message: 'Mongo fallback activated',
 			reason,
-			mode: 'Server-side stateful',
+			mode: fallbackMode,
 			mongoTarget: safeMongoTarget
 		});
 	};
@@ -602,13 +612,14 @@ function getRuntimeMode({ mongoStore } = {}) {
 		&& mongoStore
 		&& typeof mongoStore.isMongoConnected === 'function'
 		&& mongoStore.isMongoConnected());
-	const fallbackToServerStateful = Boolean(mongoConfigured && !mongoConnected);
 	const explicitServerToggleEnabled =
 		statefulModeValue === 'server'
 		|| statefulModeValue === 'true'
 		|| statefulRedisModeValue === 'server'
 		|| statefulRedisModeValue === 'true';
-	const statefulToggleEnabled = !mongoConnected && (fallbackToServerStateful || explicitServerToggleEnabled);
+	const fallbackToServerStateful = Boolean(mongoConfigured && !mongoConnected && isServerStatefulModeEnabled());
+	const statefulToggleEnabled = !mongoConnected
+		&& (mongoConfigured ? fallbackToServerStateful : explicitServerToggleEnabled);
 	const clientLocalStateful = !mongoConnected && !statefulToggleEnabled;
 	const modeLabel = mongoConnected
 		? 'Persistent with Mongo DB'
@@ -905,6 +916,7 @@ function createServer({ port = 3000, logger, metrics } = {}) {
 				await mongoStore.awaitReady();
 			}
 			const mode = getRuntimeMode({ mongoStore });
+			const useMongoStore = Boolean(mongoStore && mode.mongoConnected);
 			const scoreboardTitle = getScoreboardTitle(mode);
 
 			logEvent('info', {
@@ -949,7 +961,7 @@ function createServer({ port = 3000, logger, metrics } = {}) {
 			}
 
 			const getActiveState = async () => {
-				if (mongoStore) {
+				if (useMongoStore) {
 					return mongoStore.getState(sessionId);
 				}
 
@@ -961,7 +973,7 @@ function createServer({ port = 3000, logger, metrics } = {}) {
 			};
 
 			const setActiveState = async (nextState) => {
-				if (mongoStore) {
+				if (useMongoStore) {
 					await mongoStore.setState(sessionId, nextState);
 					return;
 				}
@@ -974,7 +986,7 @@ function createServer({ port = 3000, logger, metrics } = {}) {
 			};
 
 			const setActiveGame = async (nextGame) => {
-				if (mongoStore) {
+				if (useMongoStore) {
 					await mongoStore.setGameState(sessionId, nextGame);
 					return;
 				}
@@ -1067,7 +1079,7 @@ function createServer({ port = 3000, logger, metrics } = {}) {
 			if (req.url === '/scoreboard' && req.method === 'GET') {
 				const topScores = mode.clientLocalStateful
 					? []
-					: (mongoStore
+					: (useMongoStore
 						? await mongoStore.getTopScores(10)
 						: getTopTenScores(getInMemoryActiveState(mode, sessionId)));
 				const scoreWidth = topScores.reduce((maxWidth, entry) => {
@@ -1150,7 +1162,7 @@ function createServer({ port = 3000, logger, metrics } = {}) {
 			}
 
 			if (req.url === '/api/scoreboard' && req.method === 'GET') {
-				const topScores = mongoStore
+				const topScores = useMongoStore
 					? await mongoStore.getTopScores(10)
 					: getTopTenScores(getInMemoryActiveState(mode, sessionId));
 				res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });

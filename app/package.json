@@ -6,6 +6,8 @@
   "scripts": {
     "start": "node index.js",
     "test": "node --test",
+    "test:integration": "node -e \"process.env.RUN_MONGO_INTEGRATION='true'; const result=require('node:child_process').spawnSync(process.execPath,['--test','--test-name-pattern','\\\\[integration\\\\]'],{stdio:'inherit',env:process.env}); process.exit(result.status ?? 1);\"",
+    "test:all": "node -e \"process.env.RUN_MONGO_INTEGRATION='true'; const result=require('node:child_process').spawnSync(process.execPath,['--test'],{stdio:'inherit',env:process.env}); process.exit(result.status ?? 1);\"",
     "postinstall": "node seeds/seed.js"
   },
   "dependencies": {
