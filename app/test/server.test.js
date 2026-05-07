@@ -2051,9 +2051,101 @@ test('GET / defaults marker image toggle to off', async () => {
 
 		assert.equal(response.status, 200);
 		assert.match(body, /<meta name="use-marker-images" content="false"\s*\/>/);
+		assert.match(body, /<meta name="marker-images-path" content="\/images"\s*\/>/);
 	} finally {
 		await new Promise((resolve) => server.close(resolve));
 	}
+});
+
+test('GET / defaults marker image path to /images when MARKER_IMAGES_PATH is unset', async () => {
+	await withEnv({ MARKER_IMAGES_PATH: undefined }, async () => {
+		const server = createServer({ port: 3000 });
+		const port = await listen(server);
+
+		try {
+			const response = await fetch(`http://127.0.0.1:${port}/`);
+			const body = await response.text();
+
+			assert.equal(response.status, 200);
+			assert.match(body, /<meta name="marker-images-path" content="\/images"\s*\/>/);
+		} finally {
+			await new Promise((resolve) => server.close(resolve));
+		}
+	});
+});
+
+test('GET / uses MARKER_IMAGES_PATH for marker images when configured', async () => {
+	await withEnv({ MARKER_IMAGES_PATH: 'https://cdn.example.com/assets/markers' }, async () => {
+		const server = createServer({ port: 3000 });
+		const port = await listen(server);
+
+		try {
+			const response = await fetch(`http://127.0.0.1:${port}/`);
+			const body = await response.text();
+
+			assert.equal(response.status, 200);
+			assert.match(body, /<meta name="marker-images-path" content="https:\/\/cdn\.example\.com\/assets\/markers"\s*\/>/);
+		} finally {
+			await new Promise((resolve) => server.close(resolve));
+		}
+	});
+});
+
+test('GET / trims trailing slash from MARKER_IMAGES_PATH', async () => {
+	await withEnv({ MARKER_IMAGES_PATH: 'https://cdn.example.com/assets/markers/' }, async () => {
+		const server = createServer({ port: 3000 });
+		const port = await listen(server);
+
+		try {
+			const response = await fetch(`http://127.0.0.1:${port}/`);
+			const body = await response.text();
+
+			assert.equal(response.status, 200);
+			assert.match(body, /<meta name="marker-images-path" content="https:\/\/cdn\.example\.com\/assets\/markers"\s*\/>/);
+		} finally {
+			await new Promise((resolve) => server.close(resolve));
+		}
+	});
+});
+
+test('GET / falls back to /images when MARKER_IMAGES_PATH is non-http(s)', async () => {
+	await withEnv({ MARKER_IMAGES_PATH: 'ftp://cdn.example.com/assets/markers' }, async () => {
+		const server = createServer({ port: 3000 });
+		const port = await listen(server);
+
+		try {
+			const response = await fetch(`http://127.0.0.1:${port}/`);
+			const body = await response.text();
+
+			assert.equal(response.status, 200);
+			assert.match(body, /<meta name="marker-images-path" content="\/images"\s*\/>/);
+		} finally {
+			await new Promise((resolve) => server.close(resolve));
+		}
+	});
+});
+
+test('invalid MARKER_IMAGES_PATH logs a config warning and uses /images fallback', async () => {
+	await withEnv({ MARKER_IMAGES_PATH: 'ftp://cdn.example.com/assets/markers' }, async () => {
+		const logger = createMemoryLogger();
+		const server = createServer({ port: 3000, logger });
+		const port = await listen(server);
+
+		try {
+			const response = await fetch(`http://127.0.0.1:${port}/`);
+			const body = await response.text();
+
+			assert.equal(response.status, 200);
+			assert.match(body, /<meta name="marker-images-path" content="\/images"\s*\/>/);
+
+			const warning = logger.entries.find((entry) => entry.code === 'CFG_001');
+			assert.ok(warning, 'expected CFG_001 warning for invalid MARKER_IMAGES_PATH');
+			assert.equal(warning.level, 'warn');
+			assert.equal(warning.reason, 'invalid_marker_images_path');
+		} finally {
+			await new Promise((resolve) => server.close(resolve));
+		}
+	});
 });
 
 test('GET / enables marker image toggle when USE_MARKER_IMAGES=true', async () => {
@@ -2338,8 +2430,9 @@ test('app.js supports rendering marker images for X and O tokens', async () => {
 		const body = await response.text();
 
 		assert.equal(response.status, 200);
-		assert.match(body, /\/images\/x\.png/);
-		assert.match(body, /\/images\/o\.png/);
+		assert.match(body, /marker-images-path/);
+		assert.match(body, /\/x\.png/);
+		assert.match(body, /\/o\.png/);
 		assert.match(body, /marker-image/);
 	} finally {
 		await new Promise((resolve) => server.close(resolve));

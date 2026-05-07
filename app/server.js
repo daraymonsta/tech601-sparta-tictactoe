@@ -17,6 +17,55 @@ function isEnabledEnvToggle(value) {
 	return normalized === 'true';
 }
 
+function normalizeMarkerImagesPath(value) {
+	const trimmed = String(value || '').trim();
+	if (!trimmed) {
+		return '/images';
+	}
+
+	const withoutTrailingSlash = trimmed.replace(/\/+$/, '');
+	return withoutTrailingSlash || '/images';
+}
+
+function isHttpOrHttpsUrl(value) {
+	try {
+		const parsed = new URL(value);
+		return parsed.protocol === 'http:' || parsed.protocol === 'https:';
+	} catch {
+		return false;
+	}
+}
+
+function resolveMarkerImagesPathConfig(value) {
+	const trimmed = String(value || '').trim();
+	if (!trimmed) {
+		return {
+			markerImagesPath: '/images',
+			invalidConfiguredValue: null
+		};
+	}
+
+	if (!isHttpOrHttpsUrl(trimmed)) {
+		return {
+			markerImagesPath: '/images',
+			invalidConfiguredValue: trimmed
+		};
+	}
+
+	return {
+		markerImagesPath: normalizeMarkerImagesPath(trimmed),
+		invalidConfiguredValue: null
+	};
+}
+
+function escapeHtmlAttribute(value) {
+	return String(value || '')
+		.replace(/&/g, '&amp;')
+		.replace(/"/g, '&quot;')
+		.replace(/</g, '&lt;')
+		.replace(/>/g, '&gt;');
+}
+
 function isServerStatefulModeEnabled() {
 	const normalized = String(process.env.STATEFUL_MODE || '').trim().toLowerCase();
 	return normalized === 'server' || normalized === 'true';
@@ -624,11 +673,12 @@ function isValidStatePayload(payload) {
 	return true;
 }
 
-function getRuntimeMode({ mongoStore } = {}) {
+function getRuntimeMode({ mongoStore, markerImagesPathOverride } = {}) {
 	const mongoConfigured = Boolean(process.env.MONGODB_URI);
 	const statefulModeValue = String(process.env.STATEFUL_MODE || '').trim().toLowerCase();
 	const statefulRedisModeValue = String(process.env.STATEFUL_REDIS_MODE || '').trim().toLowerCase();
 	const markerImageToggleEnabled = isEnabledEnvToggle(process.env.USE_MARKER_IMAGES);
+	const markerImagesPath = normalizeMarkerImagesPath(markerImagesPathOverride ?? process.env.MARKER_IMAGES_PATH);
 	const mongoConnected = Boolean(mongoConfigured
 		&& mongoStore
 		&& typeof mongoStore.isMongoConnected === 'function'
@@ -651,6 +701,7 @@ function getRuntimeMode({ mongoStore } = {}) {
 		mongoConnected,
 		statefulToggleEnabled,
 		markerImageToggleEnabled,
+		markerImagesPath,
 		clientLocalStateful,
 		isPersistent: mongoConnected || statefulToggleEnabled,
 		modeLabel
@@ -864,6 +915,16 @@ function createServer({ port = 3000, logger, metrics } = {}) {
 		appLogger[level](payload);
 	};
 
+	const markerImagesPathConfig = resolveMarkerImagesPathConfig(process.env.MARKER_IMAGES_PATH);
+	if (markerImagesPathConfig.invalidConfiguredValue) {
+		logEvent('warn', {
+			code: 'CFG_001',
+			message: 'Invalid MARKER_IMAGES_PATH; using /images fallback',
+			reason: 'invalid_marker_images_path',
+			configuredValue: markerImagesPathConfig.invalidConfiguredValue
+		});
+	}
+
 	const getMongoStateStore = () => {
 		const mongoUri = process.env.MONGODB_URI;
 		if (!mongoUri) {
@@ -931,12 +992,15 @@ function createServer({ port = 3000, logger, metrics } = {}) {
 			res.setHeader('x-correlation-id', correlationId);
 
 			const sessionId = resolveSessionId(req, res);
-			const configuredMode = getRuntimeMode();
+			const configuredMode = getRuntimeMode({ markerImagesPathOverride: markerImagesPathConfig.markerImagesPath });
 			const mongoStore = configuredMode.mongoConfigured ? getMongoStateStore() : null;
 			if (mongoStore && typeof mongoStore.awaitReady === 'function') {
 				await mongoStore.awaitReady();
 			}
-			const mode = getRuntimeMode({ mongoStore });
+			const mode = getRuntimeMode({
+				mongoStore,
+				markerImagesPathOverride: markerImagesPathConfig.markerImagesPath
+			});
 			const useMongoStore = Boolean(mongoStore && mode.mongoConnected);
 			const scoreboardTitle = getScoreboardTitle(mode);
 
@@ -1032,6 +1096,7 @@ function createServer({ port = 3000, logger, metrics } = {}) {
 						<meta charset="UTF-8" />
 						<meta name="viewport" content="width=device-width, initial-scale=1.0" />
 						<meta name="use-marker-images" content="${mode.markerImageToggleEnabled ? 'true' : 'false'}" />
+						<meta name="marker-images-path" content="${escapeHtmlAttribute(mode.markerImagesPath)}" />
 						<title>Sparta App</title>
 						<link rel="stylesheet" href="/styles.css" />
 					</head>
