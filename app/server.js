@@ -10,6 +10,9 @@ const STYLES_PATH = path.join(__dirname, 'styles.css');
 const APP_JS_PATH = path.join(__dirname, 'app.js');
 const X_MARKER_IMAGE_PATH = path.join(__dirname, 'public', 'images', 'x.png');
 const O_MARKER_IMAGE_PATH = path.join(__dirname, 'public', 'images', 'o.png');
+const PACKAGE_JSON_PATH = path.join(__dirname, 'package.json');
+const PACKAGE_METADATA = JSON.parse(fs.readFileSync(PACKAGE_JSON_PATH, 'utf8'));
+const APP_VERSION = `v${PACKAGE_METADATA.version}`;
 let hasLoggedMissingMongoDriver = false;
 
 function isEnabledEnvToggle(value) {
@@ -91,6 +94,11 @@ function getMongoFallbackMessage(reason) {
 	return usesServerMemory
 		? 'Mongo connection failed; using server in-memory fallback'
 		: 'Mongo connection failed; using client-local fallback';
+}
+
+function getFooterVersionStamp() {
+	const configuredTimestamp = String(process.env.APP_FOOTER_TIMESTAMP || '').trim();
+	return configuredTimestamp ? `${APP_VERSION} ${configuredTimestamp}` : APP_VERSION;
 }
 
 function defaultGameState() {
@@ -1088,6 +1096,7 @@ function createServer({ port = 3000, logger, metrics } = {}) {
 			};
 
 			if (req.url === '/' && req.method === 'GET') {
+				const footerVersionStamp = getFooterVersionStamp();
 				res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
 				res.end(`
 				<!doctype html>
@@ -1131,6 +1140,7 @@ function createServer({ port = 3000, logger, metrics } = {}) {
 						</div>
 						<p class="page-footer">Copyright © 2026 Sparta Global</p>
 						<p class="mode-pill">Mode: ${mode.modeLabel}</p>
+						<p class="version-stamp">${escapeHtmlAttribute(footerVersionStamp)}</p>
 						<script src="/app.js"></script>
 					</body>
 				</html>

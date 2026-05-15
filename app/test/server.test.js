@@ -34,6 +34,11 @@ function listen(server) {
 	});
 }
 
+function readPackageMetadata() {
+	const packageJsonPath = path.join(__dirname, '..', 'package.json');
+	return JSON.parse(readFileSync(packageJsonPath, 'utf8'));
+}
+
 async function withEnv(overrides, run) {
 	const originalValues = {};
 
@@ -189,6 +194,13 @@ test('mongo integration test flag defaults to disabled', () => {
 			process.env.RUN_MONGO_INTEGRATION = originalFlag;
 		}
 	}
+});
+
+test('package metadata advertises official app version 1.2.0', () => {
+	const packageJson = readPackageMetadata();
+
+	assert.equal(packageJson.name, 'sparta-app-v2');
+	assert.equal(packageJson.version, '1.2.0');
 });
 
 test('request lifecycle logs include REQ_100 and REQ_200 with correlation id', async () => {
@@ -2591,7 +2603,8 @@ test('GET / places scoreboard panel below main game panel', async () => {
 	}
 });
 
-test('GET / renders copyright footer at very bottom outside panels', async () => {
+test('GET / renders copyright footer, mode pill, and package version stamp at very bottom outside panels', async () => {
+	const packageJson = readPackageMetadata();
 	const server = createServer({ port: 3000 });
 	const port = await listen(server);
 
@@ -2602,9 +2615,42 @@ test('GET / renders copyright footer at very bottom outside panels', async () =>
 		assert.equal(response.status, 200);
 		assert.match(
 			body,
-			/<\/div>\s*<p class="page-footer">Copyright © 2026 Sparta Global<\/p>\s*<p class="mode-pill">Mode:\s*(Client-local stateful|Server-side stateful|Persistent with Mongo DB)<\/p>\s*<script src="\/app\.js"><\/script>/
+			new RegExp(`</div>\\s*<p class="page-footer">Copyright © 2026 Sparta Global</p>\\s*<p class="mode-pill">Mode:\\s*(Client-local stateful|Server-side stateful|Persistent with Mongo DB)</p>\\s*<p class="version-stamp">v${packageJson.version}(?: [^<]+)?</p>\\s*<script src="/app\\.js"></script>`)
 		);
 		assert.equal(/<section class="panel">\s*<p class="page-footer">/.test(body), false);
+	} finally {
+		await new Promise((resolve) => server.close(resolve));
+	}
+});
+
+test('GET / appends configured footer timestamp after the package version', async () => {
+	const packageJson = readPackageMetadata();
+		await withEnv({ APP_FOOTER_TIMESTAMP: '15/05/2026 17:20' }, async () => {
+		const server = createServer({ port: 3000 });
+		const port = await listen(server);
+
+		try {
+			const response = await fetch(`http://127.0.0.1:${port}/`);
+			const body = await response.text();
+
+			assert.equal(response.status, 200);
+			assert.match(body, new RegExp(`<p class="version-stamp">v${packageJson.version} 15/05/2026 17:20</p>`));
+		} finally {
+			await new Promise((resolve) => server.close(resolve));
+		}
+	});
+});
+
+test('styles.css centers footer version stamp text', async () => {
+	const server = createServer({ port: 3000 });
+	const port = await listen(server);
+
+	try {
+		const response = await fetch(`http://127.0.0.1:${port}/styles.css`);
+		const body = await response.text();
+
+		assert.equal(response.status, 200);
+		assert.match(body, /\.version-stamp\s*\{[^}]*text-align:\s*center\s*;/);
 	} finally {
 		await new Promise((resolve) => server.close(resolve));
 	}
